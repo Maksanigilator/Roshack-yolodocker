@@ -1,0 +1,8 @@
+*.mp4
+*.avi
+*.mkv
+*.pt
+*.pth
+datasets/
+ros_ws/weights/
+ros_ws/data/
