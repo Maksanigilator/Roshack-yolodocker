@@ -4,5 +4,7 @@
 *.pt
 *.pth
 datasets/
-ros_ws/weights/
-ros_ws/data/
+ros_ws/weights/*
+!ros_ws/weights/.gitkeep
+ros_ws/data/*
+!ros_ws/data/.gitkeep
