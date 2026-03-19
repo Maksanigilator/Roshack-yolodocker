@@ -3,7 +3,10 @@
 *.mkv
 *.pt
 *.pth
-datasets/
+datasets/*
+!datasets/download_all.py
+!datasets/prepare_ducks.py
+!datasets/SOURCES.txt
 ros_ws/weights/*
 !ros_ws/weights/.gitkeep
 ros_ws/data/*
