@@ -44,7 +44,7 @@ docker run --gpus all -it --shm-size=8g \
 
 
 
-python3 train_ducks.py --epochs 100 --batch 8 --model weights/yolo26n.pt
+python3 train_ducks.py -m weights/yolo26m.pt -d datasets/ducks-merged/dataset.yaml --epochs 150 --batch 8 --patience 20 --name ducks_merged
 
 python3 demo.py data/image.png -m weights/yolo26m.pt -c 0.7
 
