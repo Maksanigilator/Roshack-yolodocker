@@ -3,8 +3,10 @@ FROM ${BASE_IMAGE}
 
 RUN apt-get update && apt-get install -y \
     zsh \
+    usbutils \
     libgtk2.0-dev \
     pkg-config \
+    libusb-1.0-0 \
     libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
@@ -14,7 +16,7 @@ RUN apt-get update && apt-get install -y \
     && chsh -s "$(which zsh)" root 2>/dev/null || true
 
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --force-reinstall -r /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt
 
 RUN sh -c "$(wget -O- https://github.com/deluan/zsh-in-docker/releases/download/v1.1.5/zsh-in-docker.sh)" -- \
     -t bira \
@@ -37,8 +39,13 @@ RUN apt-get update && apt-get upgrade -y && \
     ros-jazzy-joy \
     && rm -rf /var/lib/apt/lists/*
 
-RUN echo 'eval "$(register-python-argcomplete3 ros2)"' >> ~/.zshrc && \
-    echo 'eval "$(register-python-argcomplete3 colcon)"' >> ~/.zshrc
+# pyrealsense2 requires runtime libusb shared library.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libusb-1.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN echo 'if command -v register-python-argcomplete3 >/dev/null 2>&1; then eval "$(register-python-argcomplete3 ros2)"; fi' >> ~/.zshrc && \
+    echo 'if command -v register-python-argcomplete3 >/dev/null 2>&1; then eval "$(register-python-argcomplete3 colcon)"; fi' >> ~/.zshrc
 
 RUN echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc && \
     echo '[ -f /root/ros_ws/install/setup.bash ] && source /root/ros_ws/install/setup.bash' >> ~/.bashrc

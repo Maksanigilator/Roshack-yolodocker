@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 """
-Bounding-box annotation tool for YOLO datasets.
+Polygon segmentation annotator for YOLO-seg.
+
+Single class workflow for rail masks:
+  - class name: rail (configurable)
+  - each image can contain multiple polygons of the same class
 
 Controls:
-  1-9        — select class by number
-  LMB drag   — draw bounding box
-  Z / Ctrl+Z — undo last box on current image
-  S          — save & next image
-  A / Left   — previous image
-  D / Right  — next image (without saving)
-  Q / Esc    — quit
-
-Usage:
-  python3 annotate.py --classes duck robot obstacle \
-                      --input  datasets/raw_data \
-                      --output datasets/annotated
+  LMB           add polygon point
+  C / Enter     close current polygon (min 3 points)
+  X             clear current in-progress polygon
+  Z / Ctrl+Z    undo last finished polygon
+  S             save & next image
+  A / Left      previous image
+  D / Right     next image (without saving)
+  Q / Esc       quit
 """
 
+from __future__ import annotations
+
 import argparse
-import copy
-import glob
-import os
 import sys
 from pathlib import Path
 
@@ -28,160 +27,159 @@ import cv2
 import numpy as np
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-WINDOW = "Annotator"
-DEFAULT_CLASSES = ["duckie", "red_line", "white_line", "yellow_line", "obstacle"]
-COLORS = [
-    (0, 255, 0),
-    (255, 0, 0),
-    (0, 0, 255),
-    (255, 255, 0),
-    (0, 255, 255),
-    (255, 0, 255),
-    (128, 255, 0),
-    (255, 128, 0),
-    (0, 128, 255),
-    (128, 0, 255),
-]
+WINDOW = "Seg Annotator"
+MASK_COLOR = (40, 220, 80)
+POINT_COLOR = (0, 240, 255)
+EDGE_COLOR = (30, 180, 255)
 
 
-def color_for(class_id: int) -> tuple:
-    return COLORS[class_id % len(COLORS)]
-
-
-class Annotator:
-    def __init__(self, classes: list[str], input_dir: str, output_dir: str):
-        self.classes = classes
+class SegAnnotator:
+    def __init__(self, class_name: str, input_dir: str, output_dir: str) -> None:
+        self.class_name = class_name
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
-
         self.images_dir = self.output_dir / "images"
         self.labels_dir = self.output_dir / "labels"
         self.images_dir.mkdir(parents=True, exist_ok=True)
         self.labels_dir.mkdir(parents=True, exist_ok=True)
 
         self.image_paths = sorted(
-            p
-            for p in self.input_dir.iterdir()
-            if p.suffix.lower() in IMAGE_EXTENSIONS
+            p for p in self.input_dir.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS
         )
         if not self.image_paths:
             sys.exit(f"No images found in {self.input_dir}")
 
         self.idx = 0
-        self.current_class = 0
-        self.boxes: list[tuple[int, int, int, int, int]] = []  # (cls, x1, y1, x2, y2)
-        self.drawing = False
-        self.ix = 0
-        self.iy = 0
-        self.temp_box: tuple | None = None
-
+        self.polygons: list[list[tuple[int, int]]] = []
+        self.current_poly: list[tuple[int, int]] = []
         self._skip_to_first_unannotated()
 
-    def _skip_to_first_unannotated(self):
+    def _skip_to_first_unannotated(self) -> None:
         for i, p in enumerate(self.image_paths):
-            label_path = self.labels_dir / (p.stem + ".txt")
-            if not label_path.exists():
+            if not self._label_path(p).exists():
                 self.idx = i
                 return
 
     def _label_path(self, img_path: Path) -> Path:
-        return self.labels_dir / (img_path.stem + ".txt")
+        return self.labels_dir / f"{img_path.stem}.txt"
 
-    def _load_existing(self, img_path: Path, img_w: int, img_h: int):
-        """Load previously saved YOLO labels back into pixel boxes."""
-        self.boxes.clear()
-        lp = self._label_path(img_path)
-        if not lp.exists():
+    def _load_existing(self, img_path: Path, img_w: int, img_h: int) -> None:
+        self.polygons.clear()
+        self.current_poly.clear()
+        label_path = self._label_path(img_path)
+        if not label_path.exists():
             return
-        for line in lp.read_text().strip().splitlines():
-            parts = line.split()
-            if len(parts) != 5:
-                continue
-            cls = int(parts[0])
-            cx, cy, bw, bh = map(float, parts[1:])
-            x1 = int((cx - bw / 2) * img_w)
-            y1 = int((cy - bh / 2) * img_h)
-            x2 = int((cx + bw / 2) * img_w)
-            y2 = int((cy + bh / 2) * img_h)
-            self.boxes.append((cls, x1, y1, x2, y2))
 
-    def _save(self, img_path: Path, img: np.ndarray):
+        text = label_path.read_text().strip()
+        if not text:
+            return
+
+        for line in text.splitlines():
+            parts = line.strip().split()
+            if len(parts) < 7:
+                continue
+            coords = parts[1:]
+            if len(coords) % 2 != 0:
+                continue
+
+            poly: list[tuple[int, int]] = []
+            for i in range(0, len(coords), 2):
+                x = int(float(coords[i]) * img_w)
+                y = int(float(coords[i + 1]) * img_h)
+                poly.append((x, y))
+            if len(poly) >= 3:
+                self.polygons.append(poly)
+
+    def _save(self, img_path: Path, img: np.ndarray) -> None:
         h, w = img.shape[:2]
         dst_img = self.images_dir / img_path.name
         if not dst_img.exists():
             cv2.imwrite(str(dst_img), img)
 
-        lines = []
-        for cls, x1, y1, x2, y2 in self.boxes:
-            cx = ((x1 + x2) / 2) / w
-            cy = ((y1 + y2) / 2) / h
-            bw = abs(x2 - x1) / w
-            bh = abs(y2 - y1) / h
-            lines.append(f"{cls} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+        lines: list[str] = []
+        for poly in self.polygons:
+            if len(poly) < 3:
+                continue
+            pairs: list[str] = []
+            for x, y in poly:
+                xn = min(1.0, max(0.0, x / w))
+                yn = min(1.0, max(0.0, y / h))
+                pairs.append(f"{xn:.6f}")
+                pairs.append(f"{yn:.6f}")
+            lines.append("0 " + " ".join(pairs))
 
-        self._label_path(img_path).write_text("\n".join(lines) + "\n" if lines else "")
+        self._label_path(img_path).write_text("\n".join(lines) + ("\n" if lines else ""))
 
-    def _save_dataset_yaml(self):
+    def _save_dataset_yaml(self) -> None:
         yaml_path = self.output_dir / "dataset.yaml"
         lines = [
             f"path: {self.output_dir.resolve()}",
             "train: images",
             "val: images",
             "",
-            f"nc: {len(self.classes)}",
-            f"names: {self.classes}",
+            "nc: 1",
+            f"names: ['{self.class_name}']",
             "",
         ]
         yaml_path.write_text("\n".join(lines))
+
+    @staticmethod
+    def _poly_np(poly: list[tuple[int, int]]) -> np.ndarray:
+        return np.array(poly, dtype=np.int32).reshape(-1, 1, 2)
 
     def _draw(self, img: np.ndarray) -> np.ndarray:
         vis = img.copy()
         h, w = vis.shape[:2]
 
-        for cls, x1, y1, x2, y2 in self.boxes:
-            c = color_for(cls)
-            cv2.rectangle(vis, (x1, y1), (x2, y2), c, 2)
-            label = self.classes[cls] if cls < len(self.classes) else str(cls)
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-            cv2.rectangle(vis, (x1, y1 - th - 6), (x1 + tw + 4, y1), c, -1)
-            cv2.putText(vis, label, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+        if self.polygons:
+            overlay = vis.copy()
+            for poly in self.polygons:
+                cv2.fillPoly(overlay, [self._poly_np(poly)], MASK_COLOR)
+            vis = cv2.addWeighted(overlay, 0.30, vis, 0.70, 0)
 
-        if self.temp_box:
-            tx1, ty1, tx2, ty2 = self.temp_box
-            c = color_for(self.current_class)
-            cv2.rectangle(vis, (tx1, ty1), (tx2, ty2), c, 1)
+        for i, poly in enumerate(self.polygons, start=1):
+            cv2.polylines(vis, [self._poly_np(poly)], isClosed=True, color=EDGE_COLOR, thickness=2)
+            anchor = poly[0]
+            cv2.putText(
+                vis,
+                f"{self.class_name}#{i}",
+                (anchor[0] + 4, anchor[1] - 6),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+            )
 
-        bar_h = 36
-        cv2.rectangle(vis, (0, h - bar_h), (w, h), (40, 40, 40), -1)
+        if self.current_poly:
+            for pt in self.current_poly:
+                cv2.circle(vis, pt, 4, POINT_COLOR, -1)
+            for i in range(1, len(self.current_poly)):
+                cv2.line(vis, self.current_poly[i - 1], self.current_poly[i], POINT_COLOR, 2)
 
-        status = f"[{self.idx + 1}/{len(self.image_paths)}]  "
-        for i, name in enumerate(self.classes):
-            marker = ">> " if i == self.current_class else "   "
-            status += f"{marker}{i + 1}:{name}  "
-        status += f" | boxes: {len(self.boxes)}"
-
-        cv2.putText(vis, status, (8, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
-
+        bar_h = 74
+        cv2.rectangle(vis, (0, h - bar_h), (w, h), (30, 30, 30), -1)
+        line1 = (
+            f"[{self.idx + 1}/{len(self.image_paths)}] class={self.class_name} "
+            f"| masks={len(self.polygons)} | current_points={len(self.current_poly)}"
+        )
+        line2 = "LMB add point | C/Enter close | X clear current | Z undo | S save | A/D prev/next | Q exit"
+        cv2.putText(vis, line1, (8, h - 44), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (220, 220, 220), 1)
+        cv2.putText(vis, line2, (8, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 200, 200), 1)
         return vis
 
-    def _mouse_cb(self, event, x, y, flags, param):
+    def _mouse_cb(self, event: int, x: int, y: int, _flags: int, _param: object) -> None:
         if event == cv2.EVENT_LBUTTONDOWN:
-            self.drawing = True
-            self.ix, self.iy = x, y
-            self.temp_box = None
+            self.current_poly.append((x, y))
 
-        elif event == cv2.EVENT_MOUSEMOVE and self.drawing:
-            self.temp_box = (self.ix, self.iy, x, y)
+    def _close_current_polygon(self) -> bool:
+        if len(self.current_poly) < 3:
+            print("  need at least 3 points to close polygon")
+            return False
+        self.polygons.append(self.current_poly.copy())
+        self.current_poly.clear()
+        return True
 
-        elif event == cv2.EVENT_LBUTTONUP and self.drawing:
-            self.drawing = False
-            self.temp_box = None
-            x1, y1 = min(self.ix, x), min(self.iy, y)
-            x2, y2 = max(self.ix, x), max(self.iy, y)
-            if abs(x2 - x1) > 4 and abs(y2 - y1) > 4:
-                self.boxes.append((self.current_class, x1, y1, x2, y2))
-
-    def run(self):
+    def run(self) -> None:
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
         cv2.setMouseCallback(WINDOW, self._mouse_cb)
 
@@ -195,42 +193,49 @@ class Annotator:
 
             h_img, w_img = img.shape[:2]
             self._load_existing(img_path, w_img, h_img)
-
-            cv2.setWindowTitle(WINDOW, f"Annotator — {img_path.name}")
+            cv2.setWindowTitle(WINDOW, f"Seg Annotator — {img_path.name}")
 
             while True:
-                vis = self._draw(img)
-                cv2.imshow(WINDOW, vis)
+                cv2.imshow(WINDOW, self._draw(img))
                 key = cv2.waitKey(30) & 0xFF
 
-                if key == 27 or key == ord("q"):
+                if key in (27, ord("q")):
                     self._save_dataset_yaml()
                     cv2.destroyAllWindows()
-                    print("Done. Dataset saved to", self.output_dir)
+                    print("Done. Segmentation dataset saved to", self.output_dir)
                     return
 
-                if key == 26 or key == ord("z"):  # Ctrl+Z or Z
-                    if self.boxes:
-                        removed = self.boxes.pop()
-                        cls_name = self.classes[removed[0]] if removed[0] < len(self.classes) else str(removed[0])
-                        print(f"  undo: removed {cls_name} box")
+                if key in (ord("c"), 13):
+                    if self._close_current_polygon():
+                        print(f"  polygon closed, total masks: {len(self.polygons)}")
 
-                for i in range(min(9, len(self.classes))):
-                    if key == ord(str(i + 1)):
-                        self.current_class = i
-                        print(f"  class → {self.classes[i]}")
+                if key == ord("x"):
+                    if self.current_poly:
+                        self.current_poly.clear()
+                        print("  current polygon cleared")
+
+                if key in (26, ord("z")):
+                    if self.current_poly:
+                        self.current_poly.pop()
+                        print("  removed last point from current polygon")
+                    elif self.polygons:
+                        self.polygons.pop()
+                        print(f"  removed last saved mask, left: {len(self.polygons)}")
 
                 if key == ord("s"):
+                    if self.current_poly:
+                        print("  current polygon not closed, auto-closing before save")
+                        self._close_current_polygon()
                     self._save(img_path, img)
-                    print(f"  saved {img_path.name}: {len(self.boxes)} boxes")
+                    print(f"  saved {img_path.name}: {len(self.polygons)} mask(s)")
                     self.idx = min(self.idx + 1, len(self.image_paths) - 1)
                     break
 
-                if key == ord("d") or key == 83:  # D or Right arrow
+                if key in (ord("d"), 83):
                     self.idx = min(self.idx + 1, len(self.image_paths) - 1)
                     break
 
-                if key == ord("a") or key == 81:  # A or Left arrow
+                if key in (ord("a"), 81):
                     self.idx = max(self.idx - 1, 0)
                     break
 
@@ -243,31 +248,30 @@ class Annotator:
                     self._save_dataset_yaml()
                     return
 
-        cv2.destroyAllWindows()
 
-
-def main():
-    parser = argparse.ArgumentParser(description="YOLO bounding-box annotation tool")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="YOLO segmentation polygon annotator")
     parser.add_argument(
-        "--classes", "-c",
-        nargs="+",
-        default=DEFAULT_CLASSES,
-        help=f"List of class names (default: {DEFAULT_CLASSES})",
+        "--class-name",
+        default="rail",
+        help="Single class name for masks (default: rail)",
     )
     parser.add_argument(
-        "--input", "-i",
-        default="datasets/raw_data",
-        help="Directory with source images (default: datasets/raw_data)",
+        "--input",
+        "-i",
+        default="saved_frames/raw",
+        help="Directory with source images (default: saved_frames/raw)",
     )
     parser.add_argument(
-        "--output", "-o",
-        default="datasets/annotated",
-        help="Output directory for the YOLO dataset (default: datasets/annotated)",
+        "--output",
+        "-o",
+        default="datasets/agrobot_seg_v1",
+        help="Output directory for YOLO-seg dataset (default: datasets/agrobot_seg_v1)",
     )
     args = parser.parse_args()
 
     out = Path(args.output).resolve()
-    print(f"Classes : {args.classes}")
+    print(f"Class   : {args.class_name}")
     print(f"Input   : {Path(args.input).resolve()}")
     print(f"Output  : {out}")
     print(f"  images → {out / 'images'}")
@@ -275,15 +279,16 @@ def main():
     print(f"  config → {out / 'dataset.yaml'}")
     print()
     print("Controls:")
-    print("  1-9        select class")
-    print("  LMB drag   draw box")
-    print("  Z/Ctrl+Z   undo last box")
-    print("  S          save & next")
-    print("  A/D        prev/next image")
-    print("  Q/Esc      quit")
+    print("  LMB         add point")
+    print("  C / Enter   close current polygon")
+    print("  X           clear current polygon")
+    print("  Z / Ctrl+Z  undo point / last polygon")
+    print("  S           save & next image")
+    print("  A / D       previous / next image")
+    print("  Q / Esc     quit")
     print()
 
-    annotator = Annotator(args.classes, args.input, args.output)
+    annotator = SegAnnotator(args.class_name, args.input, args.output)
     annotator.run()
 
 

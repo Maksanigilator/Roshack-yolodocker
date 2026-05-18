@@ -1,0 +1,11 @@
+{
+  "aspect": "16:9",
+  "output_size": [1280, 720],
+  "reference_image": "saved_frames/full_frame_20260321_184045_553.png",
+  "normalized_crop": {
+    "left": 0.097656,
+    "top": 0.190278,
+    "width": 0.696875,
+    "height": 0.697222
+  }
+}

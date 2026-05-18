@@ -5,6 +5,7 @@
 *.pth
 datasets/*
 !datasets/download_all.py
+!datasets/download_roboflow_izapa.py
 !datasets/prepare_ducks.py
 !datasets/SOURCES.txt
 ros_ws/weights/*
