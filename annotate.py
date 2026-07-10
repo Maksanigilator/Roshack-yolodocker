@@ -11,6 +11,7 @@ Controls:
   C / Enter     close current polygon (min 3 points)
   X             clear current in-progress polygon
   Z / Ctrl+Z    undo last finished polygon
+  H             hide/show on-screen help
   S             save & next image
   A / Left      previous image
   D / Right     next image (without saving)
@@ -52,6 +53,7 @@ class SegAnnotator:
         self.idx = 0
         self.polygons: list[list[tuple[int, int]]] = []
         self.current_poly: list[tuple[int, int]] = []
+        self.show_help = True
         self._skip_to_first_unannotated()
 
     def _skip_to_first_unannotated(self) -> None:
@@ -113,7 +115,6 @@ class SegAnnotator:
     def _save_dataset_yaml(self) -> None:
         yaml_path = self.output_dir / "dataset.yaml"
         lines = [
-            f"path: {self.output_dir.resolve()}",
             "train: images",
             "val: images",
             "",
@@ -156,15 +157,16 @@ class SegAnnotator:
             for i in range(1, len(self.current_poly)):
                 cv2.line(vis, self.current_poly[i - 1], self.current_poly[i], POINT_COLOR, 2)
 
-        bar_h = 74
-        cv2.rectangle(vis, (0, h - bar_h), (w, h), (30, 30, 30), -1)
-        line1 = (
-            f"[{self.idx + 1}/{len(self.image_paths)}] class={self.class_name} "
-            f"| masks={len(self.polygons)} | current_points={len(self.current_poly)}"
-        )
-        line2 = "LMB add point | C/Enter close | X clear current | Z undo | S save | A/D prev/next | Q exit"
-        cv2.putText(vis, line1, (8, h - 44), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (220, 220, 220), 1)
-        cv2.putText(vis, line2, (8, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 200, 200), 1)
+        if self.show_help:
+            bar_h = 74
+            cv2.rectangle(vis, (0, 0), (w, bar_h), (30, 30, 30), -1)
+            line1 = (
+                f"[{self.idx + 1}/{len(self.image_paths)}] class={self.class_name} "
+                f"| masks={len(self.polygons)} | current_points={len(self.current_poly)}"
+            )
+            line2 = "LMB add point | C/Enter close | X clear | Z undo | H help | S save | A/D prev/next | Q exit"
+            cv2.putText(vis, line1, (8, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (220, 220, 220), 1)
+            cv2.putText(vis, line2, (8, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 200, 200), 1)
         return vis
 
     def _mouse_cb(self, event: int, x: int, y: int, _flags: int, _param: object) -> None:
@@ -208,6 +210,9 @@ class SegAnnotator:
                 if key in (ord("c"), 13):
                     if self._close_current_polygon():
                         print(f"  polygon closed, total masks: {len(self.polygons)}")
+
+                if key == ord("h"):
+                    self.show_help = not self.show_help
 
                 if key == ord("x"):
                     if self.current_poly:
@@ -283,6 +288,7 @@ def main() -> None:
     print("  C / Enter   close current polygon")
     print("  X           clear current polygon")
     print("  Z / Ctrl+Z  undo point / last polygon")
+    print("  H           hide/show on-screen help")
     print("  S           save & next image")
     print("  A / D       previous / next image")
     print("  Q / Esc     quit")

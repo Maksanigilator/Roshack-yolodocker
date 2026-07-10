@@ -469,7 +469,7 @@ def main() -> None:
     try:
         while True:
             now = time.monotonic()
-            dt = now - last_t
+            loop_dt = now - last_t
             last_t = now
 
             frames = pipeline.wait_for_frames()
@@ -521,8 +521,8 @@ def main() -> None:
                 state.center_x_lookahead_viz = kalman_lookahead_x.update(state.center_x_lookahead)
 
             if state.ok:
-                lat_terms = lat_pid.update(-state.center_error_m, dt)
-                head_terms = yaw_pid.update(state.heading_error_rad, dt)
+                lat_terms = lat_pid.update(-state.center_error_m, loop_dt)
+                head_terms = yaw_pid.update(state.heading_error_rad, loop_dt)
                 cmd_y = -lat_terms.output
                 cmd_yaw = head_terms.output
                 if yaw_invert_enabled:

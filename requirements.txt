@@ -2,3 +2,5 @@ opencv-python
 roboflow
 PyYAML
 pyrealsense2
+rosbags
+imageio-ffmpeg
