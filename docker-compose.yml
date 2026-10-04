@@ -24,3 +24,51 @@ services:
       - /dev/dri:/dev/dri
       - /dev/bus/usb:/dev/bus/usb
     command: zsh
+
+  # ── Сегментатор рельсов для навигационного стека Nav_Test ──
+  #
+  # Отдельная служба, а не правка pipe_rail_autodock выше: та работает от
+  # root и монтирует проект в /root/ros_ws, а здесь нужен UID хоста, и под
+  # ним в /root не войти — у каталога права drwx------.
+  #
+  # ЗАЧЕМ UID ХОСТА. Fast DDS доставляет данные через разделяемую память,
+  # записывая файлы в /dev/shm с правами 0644 и владельцем-создателем. При
+  # разных пользователях у сторон доставка запрещена, и выглядит это
+  # обманчиво: узлы и топики друг друга видны, а данных нет. Навигационный
+  # контейнер Nav_Test запускается с UID хоста, поэтому и здесь он же.
+  #
+  # ЗАЧЕМ ПРОФИЛЬ DDS. По умолчанию Fast DDS заводит сегмент разделяемой
+  # памяти около 512 КБ, а цветной кадр 848x480 весит 1.22 МБ. Сообщение в
+  # сегмент не влезает, разделяемая память для него не используется, и
+  # выходит хуже, чем на чистом UDP: замерено 22-23 Гц вместо 30. Профиль
+  # поднимает сегмент до 64 МБ.
+  rail_mask:
+    image: yolo:latest
+    container_name: rail_mask
+    network_mode: host
+    ipc: host
+    gpus: all
+    user: "1000:1000"
+    # Своя точка монтирования: /root под этим пользователем недоступен.
+    working_dir: /ws
+    environment:
+      ROS_DOMAIN_ID: "0"
+      FASTDDS_DEFAULT_PROFILES_FILE: /ws/fastdds_profiles.xml
+      FASTRTPS_DEFAULT_PROFILES_FILE: /ws/fastdds_profiles.xml
+      # HOME и кеши — в /tmp контейнера. В /root их не пустят (drwx------),
+      # а в примонтированный /ws класть не надо: это рабочая копия репозитория,
+      # и ultralytics с matplotlib насорят в ней своими настройками.
+      HOME: /tmp
+      YOLO_CONFIG_DIR: /tmp
+      MPLCONFIGDIR: /tmp/matplotlib
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+    volumes:
+      - ./:/ws
+    # Штатный entrypoint обходим: он пишет в /root/ros_ws и работает на zsh
+    # из root-профиля.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      # RAIL_MASK_ARGS прокидывает параметры узла без правки файла, например:
+      #   RAIL_MASK_ARGS="-p max_rate:=1.0" docker compose up rail_mask
+      - "source /opt/ros/jazzy/setup.bash && exec python3 /ws/rail_mask_node.py --ros-args --log-level info ${RAIL_MASK_ARGS:-}"
