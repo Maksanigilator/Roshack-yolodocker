@@ -1,0 +1,23 @@
+{
+  "robot_x_pct": 50,
+  "robot_tilt_off": 44,
+  "target_y_pct": 80,
+  "lookahead_y_pct": 45,
+  "kp_lat_x1000": 437,
+  "ki_lat_x1000": 115,
+  "kd_lat_x1000": 74,
+  "kp_yaw_x1000": 103,
+  "ki_yaw_x1000": 45,
+  "kd_yaw_x1000": 135,
+  "cmd_x_x1000": 120,
+  "mpp_um": 3500,
+  "model": "ros_ws/weights/runs/segment/ros_ws/weights/runs/agrobot_seg_v2_fresh_v1/weights/best.pt",
+  "cmd_topic": "/cmd_nav",
+  "publish_enabled": true,
+  "kalman_enabled": true,
+  "yaw_invert_enabled": true,
+  "kalman_q": 0.0001,
+  "kalman_r": 80.0,
+  "control_mode": "sequence",
+  "saved_at": "2026-07-10T14:50:04"
+}

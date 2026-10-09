@@ -44,6 +44,35 @@ SETTINGS_BUTTON_TOP_LEFT = (260, 20)
 SETTINGS_BUTTON_SIZE = (260, 62)
 
 
+@dataclass(frozen=True)
+class SequenceModeParams:
+    """Параметры режима sequence, все в одном месте."""
+
+    yaw_align_tol_deg: float = 1.0  # Допуск по углу (градусы) для завершения фазы выравнивания по yaw.
+    yaw_align_hold_s: float = 0.8  # Сколько секунд угол должен оставаться в допуске перед переходом дальше.
+    yaw_lateral_ref_m: float = 0.2  # Масштаб для учета бокового смещения в yaw-выравнивании (чем меньше, тем сильнее влияние center_error).
+    yaw_lateral_weight: float = 0.25  # Вес боковой добавки в yaw-контуре на фазе ALIGN_YAW (0..1).
+    yaw_deadband_deg: float = 1.0  # Мертвая зона по yaw-ошибке: внутри нее cmd_yaw принудительно 0.
+    lateral_align_tol_m: float = 0.035  # Допуск по боковой ошибке (метры) для завершения фазы бокового выравнивания.
+    lateral_align_hold_s: float = 0.8  # Сколько секунд боковая ошибка должна быть в допуске.
+    forward_speed: float = 0.5  # Постоянная скорость движения вперед в фазе FORWARD (м/с).
+    forward_duration_s: float = 8.0  # Длительность фазы FORWARD (сек).
+    backward_speed: float = 0.1  # Модуль скорости движения назад в фазе BACKWARD (м/с).
+    backward_duration_s: float = 2.5  # Длительность фазы BACKWARD (сек).
+
+
+@dataclass
+class SequenceRuntime:
+    phase: str = "ALIGN_YAW"
+    phase_started_t: float = 0.0
+    yaw_stable_since: float | None = None
+    lateral_stable_since: float | None = None
+
+
+# Меняй значения здесь, чтобы подстроить поведение sequence-режима.
+SEQUENCE_MODE_PARAMS = SequenceModeParams()
+
+
 @dataclass
 class DetectionState:
     ok: bool = False
@@ -173,6 +202,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-kalman", action="store_true", help="Disable Kalman filter for mask-derived centerline points")
     parser.add_argument("--kalman-q", type=float, default=0.0001, help="Kalman process noise (Q)")
     parser.add_argument("--kalman-r", type=float, default=80.0, help="Kalman measurement noise (R)")
+    parser.add_argument(
+        "--control-mode",
+        choices=("pid", "sequence"),
+        default="pid",
+        help="Control mode: pid (current behavior) or sequence (yaw->lateral->forward->backward cycle)",
+    )
     parser.add_argument(
         "--model",
         type=Path,
@@ -326,6 +361,9 @@ def draw_overlay(
     x_gate_wait_s: float,
     cmd_x_ref: float,
     yaw_invert_enabled: bool,
+    control_mode: str,
+    sequence_phase: str,
+    sequence_elapsed_s: float,
 ) -> np.ndarray:
     view = frame.copy()
     if np.count_nonzero(mask) > 0:
@@ -359,6 +397,41 @@ def draw_overlay(
             2,
         )
 
+    # Control command indicators: lateral shift arrow and yaw arrow.
+    cmd_panel_x = view.shape[1] - 220
+    cmd_panel_y = 18
+    cmd_panel_w = 200
+    cmd_panel_h = 110
+    cv2.rectangle(view, (cmd_panel_x, cmd_panel_y), (cmd_panel_x + cmd_panel_w, cmd_panel_y + cmd_panel_h), (35, 35, 35), -1)
+    cv2.rectangle(view, (cmd_panel_x, cmd_panel_y), (cmd_panel_x + cmd_panel_w, cmd_panel_y + cmd_panel_h), (220, 220, 220), 1)
+    cv2.putText(view, "CONTROL", (cmd_panel_x + 52, cmd_panel_y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (235, 235, 235), 1)
+
+    max_cmd_y = 0.7
+    max_cmd_yaw = 1.2
+    shift_norm = max(-1.0, min(1.0, cmd_y / max_cmd_y))
+    yaw_norm = max(-1.0, min(1.0, cmd_yaw / max_cmd_yaw))
+
+    # Lateral shift indicator.
+    shift_cx = cmd_panel_x + 100
+    shift_cy = cmd_panel_y + 48
+    shift_len = int(70 * abs(shift_norm))
+    if shift_len > 1:
+        shift_end = (shift_cx + int(shift_len * (1 if shift_norm >= 0 else -1)), shift_cy)
+        cv2.arrowedLine(view, (shift_cx, shift_cy), shift_end, (80, 255, 255), 3, tipLength=0.25)
+    cv2.line(view, (shift_cx - 72, shift_cy), (shift_cx + 72, shift_cy), (90, 90, 90), 1)
+    cv2.putText(view, "shift", (cmd_panel_x + 12, shift_cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1)
+
+    # Yaw indicator.
+    yaw_cx = cmd_panel_x + 100
+    yaw_cy = cmd_panel_y + 86
+    yaw_len = int(22 * abs(yaw_norm))
+    if yaw_len > 1:
+        yaw_end = (yaw_cx + int(yaw_len * (1 if yaw_norm >= 0 else -1)), yaw_cy)
+        cv2.arrowedLine(view, (yaw_cx, yaw_cy), yaw_end, (120, 220, 120), 3, tipLength=0.35)
+    cv2.line(view, (yaw_cx - 24, yaw_cy), (yaw_cx + 24, yaw_cy), (90, 90, 90), 1)
+    yaw_dir = "CCW" if cmd_yaw >= 0 else "CW"
+    cv2.putText(view, f"yaw {yaw_dir}", (cmd_panel_x + 12, yaw_cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1)
+
     x0, y0 = BUTTON_TOP_LEFT
     bw, bh = BUTTON_SIZE
     cv2.rectangle(view, (x0, y0), (x0 + bw, y0 + bh), (45, 170, 75), -1)
@@ -371,11 +444,17 @@ def draw_overlay(
     cv2.putText(view, "SAVE SETTINGS [K]", (sx0 + 14, sy0 + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (0, 0, 0), 2)
 
     info_x, info_y = 15, y0 + bh + 28
+    mode_detail = (
+        f"x_gate={'READY' if x_gate_ready else 'WAIT'} wait={x_gate_wait_s:.2f}s (|y|,|yaw| < 0.1 for 2.0s)"
+        if control_mode == "pid"
+        else "sequence: ALIGN_YAW -> ALIGN_LATERAL -> FORWARD -> BACKWARD"
+    )
     lines = [
         f"saved={saved_count}  conf={conf:.2f}  detect={'YES' if state.ok else 'NO'}",
+        f"mode={control_mode}  phase={sequence_phase}  phase_t={sequence_elapsed_s:.2f}s",
         f"center_err={state.center_error_m:+.4f} m  heading_err={math.degrees(state.heading_error_rad):+.2f} deg",
         f"cmd_x={cmd_x:+.3f} (ref={cmd_x_ref:+.3f})  cmd_y={cmd_y:+.4f}  cmd_yaw={cmd_yaw:+.4f}",
-        f"x_gate={'READY' if x_gate_ready else 'WAIT'} wait={x_gate_wait_s:.2f}s (|y|,|yaw| < 0.1 for 2.0s)",
+        mode_detail,
         f"PID_lat P={lat_terms.p:+.4f} I={lat_terms.i:+.4f} D={lat_terms.d:+.4f}",
         f"PID_yaw P={head_terms.p:+.4f} I={head_terms.i:+.4f} D={head_terms.d:+.4f}",
         f"topic={cmd_topic} publish={'ON' if publish_enabled else 'OFF'} kalman={'ON' if kalman_enabled else 'OFF'} yaw_inv={'ON' if yaw_invert_enabled else 'OFF'}",
@@ -462,6 +541,7 @@ def main() -> None:
     x_gate_threshold = 0.1
     align_stable_since: float | None = None
     last_t = time.monotonic()
+    seq = SequenceRuntime(phase_started_t=last_t)
     rclpy.init(args=None)
     ros_node = CmdNavPublisher(topic=args.cmd_topic, publish_enabled=not args.no_publish)
     ros_node.get_logger().info(f"Publishing Twist to {args.cmd_topic}, enabled={ros_node.publish_enabled}")
@@ -520,40 +600,117 @@ def main() -> None:
                 state.center_x_target_viz = kalman_target_x.update(state.center_x_target)
                 state.center_x_lookahead_viz = kalman_lookahead_x.update(state.center_x_lookahead)
 
-            if state.ok:
-                lat_terms = lat_pid.update(-state.center_error_m, loop_dt)
-                head_terms = yaw_pid.update(state.heading_error_rad, loop_dt)
-                cmd_y = -lat_terms.output
-                cmd_yaw = head_terms.output
-                if yaw_invert_enabled:
-                    cmd_yaw = -cmd_yaw
-                stable = abs(cmd_y) < x_gate_threshold and abs(cmd_yaw) < x_gate_threshold
-                if stable:
-                    if align_stable_since is None:
-                        align_stable_since = now
-                else:
-                    align_stable_since = None
-                ready = align_stable_since is not None and (now - align_stable_since) >= x_gate_hold_s
-                cmd_x = approach_speed if ready else 0.0
-            else:
+            lat_terms = PidTerms(0.0, 0.0, 0.0, 0.0)
+            head_terms = PidTerms(0.0, 0.0, 0.0, 0.0)
+            cmd_x = 0.0
+            cmd_y = 0.0
+            cmd_yaw = 0.0
+            x_gate_ready = False
+            wait_left = x_gate_hold_s
+
+            if not state.ok:
                 lat_pid.reset()
                 yaw_pid.reset()
                 kalman_target_x.reset()
                 kalman_lookahead_x.reset()
                 align_stable_since = None
-                lat_terms = PidTerms(0.0, 0.0, 0.0, 0.0)
-                head_terms = PidTerms(0.0, 0.0, 0.0, 0.0)
-                cmd_x = 0.0
-                cmd_y = 0.0
-                cmd_yaw = 0.0
-
-            if align_stable_since is None:
-                wait_left = x_gate_hold_s
-                x_gate_ready = False
+                seq.phase = "ALIGN_YAW"
+                seq.phase_started_t = now
+                seq.yaw_stable_since = None
+                seq.lateral_stable_since = None
             else:
-                elapsed = now - align_stable_since
-                wait_left = max(0.0, x_gate_hold_s - elapsed)
-                x_gate_ready = elapsed >= x_gate_hold_s
+                if args.control_mode == "pid":
+                    # Принятая конвенция: center_error_m > 0 означает, что целевая линия правее робота.
+                    # Поэтому cmd_y должен иметь тот же знак, чтобы ехать в сторону линии.
+                    lat_terms = lat_pid.update(state.center_error_m, loop_dt)
+                    head_terms = yaw_pid.update(state.heading_error_rad, loop_dt)
+                    cmd_y = lat_terms.output
+                    cmd_yaw = head_terms.output
+                    if yaw_invert_enabled:
+                        cmd_yaw = -cmd_yaw
+                    stable = abs(cmd_y) < x_gate_threshold and abs(cmd_yaw) < x_gate_threshold
+                    if stable:
+                        if align_stable_since is None:
+                            align_stable_since = now
+                    else:
+                        align_stable_since = None
+                    ready = align_stable_since is not None and (now - align_stable_since) >= x_gate_hold_s
+                    cmd_x = approach_speed if ready else 0.0
+                    if align_stable_since is not None:
+                        elapsed = now - align_stable_since
+                        wait_left = max(0.0, x_gate_hold_s - elapsed)
+                        x_gate_ready = elapsed >= x_gate_hold_s
+                else:
+                    params = SEQUENCE_MODE_PARAMS
+                    lat_terms = lat_pid.update(state.center_error_m, loop_dt)
+                    cmd_y = lat_terms.output
+
+                    if seq.phase == "ALIGN_YAW":
+                        # Боковую добавку используем только для стартового выравнивания yaw,
+                        # чтобы не "залипал" знак поворота при смещении робота от целевой линии.
+                        lateral_yaw_term = math.atan2(state.center_error_m, max(1e-6, params.yaw_lateral_ref_m))
+                        yaw_error_for_control = state.heading_error_rad + params.yaw_lateral_weight * lateral_yaw_term
+                        head_terms = yaw_pid.update(yaw_error_for_control, loop_dt)
+                        cmd_yaw = -head_terms.output if yaw_invert_enabled else head_terms.output
+                        if abs(math.degrees(yaw_error_for_control)) < params.yaw_deadband_deg:
+                            cmd_yaw = 0.0
+                        cmd_x = 0.0
+                        cmd_y = 0.0
+                        yaw_ok = abs(math.degrees(state.heading_error_rad)) <= params.yaw_align_tol_deg
+                        if yaw_ok:
+                            if seq.yaw_stable_since is None:
+                                seq.yaw_stable_since = now
+                            elif (now - seq.yaw_stable_since) >= params.yaw_align_hold_s:
+                                seq.phase = "ALIGN_LATERAL"
+                                seq.phase_started_t = now
+                                seq.lateral_stable_since = None
+                                lat_pid.reset()
+                        else:
+                            seq.yaw_stable_since = None
+
+                    elif seq.phase == "ALIGN_LATERAL":
+                        # На боковом выравнивании yaw-контур идет только от heading_error (без боковой добавки).
+                        head_terms = yaw_pid.update(state.heading_error_rad, loop_dt)
+                        cmd_yaw = -head_terms.output if yaw_invert_enabled else head_terms.output
+                        if abs(math.degrees(state.heading_error_rad)) < params.yaw_deadband_deg:
+                            cmd_yaw = 0.0
+                        cmd_x = 0.0
+                        lateral_ok = abs(state.center_error_m) <= params.lateral_align_tol_m
+                        if lateral_ok:
+                            if seq.lateral_stable_since is None:
+                                seq.lateral_stable_since = now
+                            elif (now - seq.lateral_stable_since) >= params.lateral_align_hold_s:
+                                seq.phase = "FORWARD"
+                                seq.phase_started_t = now
+                        else:
+                            seq.lateral_stable_since = None
+
+                    elif seq.phase == "FORWARD":
+                        # На движении вперед yaw также стабилизируем только по heading_error.
+                        head_terms = yaw_pid.update(state.heading_error_rad, loop_dt)
+                        cmd_yaw = -head_terms.output if yaw_invert_enabled else head_terms.output
+                        if abs(math.degrees(state.heading_error_rad)) < params.yaw_deadband_deg:
+                            cmd_yaw = 0.0
+                        cmd_x = params.forward_speed
+                        if (now - seq.phase_started_t) >= params.forward_duration_s:
+                            seq.phase = "BACKWARD"
+                            seq.phase_started_t = now
+                            lat_pid.reset()
+                            yaw_pid.reset()
+
+                    elif seq.phase == "BACKWARD":
+                        cmd_x = -params.backward_speed
+                        cmd_y = 0.0
+                        cmd_yaw = 0.0
+                        lat_terms = PidTerms(0.0, 0.0, 0.0, 0.0)
+                        head_terms = PidTerms(0.0, 0.0, 0.0, 0.0)
+                        if (now - seq.phase_started_t) >= params.backward_duration_s:
+                            seq.phase = "ALIGN_YAW"
+                            seq.phase_started_t = now
+                            seq.yaw_stable_since = None
+                            seq.lateral_stable_since = None
+                            lat_pid.reset()
+                            yaw_pid.reset()
 
             ros_node.publish_cmd(cmd_x, cmd_y, cmd_yaw)
             rclpy.spin_once(ros_node, timeout_sec=0.0)
@@ -582,6 +739,9 @@ def main() -> None:
                 x_gate_wait_s=wait_left,
                 cmd_x_ref=approach_speed,
                 yaw_invert_enabled=yaw_invert_enabled,
+                control_mode=args.control_mode,
+                sequence_phase=seq.phase if state.ok else "NO_DETECTION",
+                sequence_elapsed_s=now - seq.phase_started_t,
             )
             cv2.imshow(WINDOW_NAME, view)
 
@@ -598,6 +758,10 @@ def main() -> None:
                 kalman_target_x.reset()
                 kalman_lookahead_x.reset()
                 align_stable_since = None
+                seq.phase = "ALIGN_YAW"
+                seq.phase_started_t = now
+                seq.yaw_stable_since = None
+                seq.lateral_stable_since = None
                 ros_node.publish_zero()
                 print("PID and Kalman filters reset.")
 
@@ -639,6 +803,7 @@ def main() -> None:
                     "yaw_invert_enabled": yaw_invert_enabled,
                     "kalman_q": args.kalman_q,
                     "kalman_r": args.kalman_r,
+                    "control_mode": args.control_mode,
                     "saved_at": dt.datetime.now().isoformat(timespec="seconds"),
                 }
                 save_settings(args.settings, settings)

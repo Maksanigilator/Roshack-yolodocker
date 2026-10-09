@@ -12,3 +12,9 @@ ros_ws/weights/*
 !ros_ws/weights/.gitkeep
 ros_ws/data/*
 !ros_ws/data/.gitkeep
+__pycache__/
+*.pyc
+core.*
+*.bag
+RealSence_data/
+saved_frames/raw/

@@ -49,3 +49,11 @@ python3 train_ducks.py -m weights/yolo26m.pt -d datasets/ducks-merged/dataset.ya
 python3 demo.py data/image.png -m weights/yolo26m.pt -c 0.7
 
 python3 demo.py -m weights/runs/ducks_m/weights/best.pt datasets/yolo-rubber-ducks/data/image_100.jpg -c 0.1
+
+
+python3 demo.py datasets/my-project/unannotated/WIN_20260321_13_42_42_Pro.jpg -m weights/runs/new12/weights/best.pt -c 0.1
+
+
+
+# Докачать новое + обновить разметку из облака
+python datasets/download_my_project.py --key Ai1WskIFISGZMCbF0z0d --sync
